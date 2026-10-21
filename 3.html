@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>4スレッド並列 File System Access API</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 500px;
+            margin: 40px auto;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="number"] {
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+        }
+        button {
+            width: 100%;
+            padding: 10px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        button:disabled {
+            background-color: #ccc;
+        }
+        #status {
+            margin-top: 15px;
+            font-size: 14px;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>4スレッド並列 16MB .bin 生成</h2>
+    
+    <div class="form-group">
+        <label for="fileCount">作成する合計個数:</label>
+        <input type="number" id="fileCount" value="8" min="1" max="100">
+    </div>
+
+    <button id="startBtn" onclick="startParallelGeneration()">フォルダを選択して4並列処理開始</button>
+    
+    <div id="status"></div>
+
+    <script>
+        // バックグラウンドで動作する Worker のスクリプト定義
+        const workerScript = `
+            self.onmessage = async (e) => {
+                const { workerId, dirHandle, fileList } = e.data;
+                const FILE_SIZE = 16 * 1024 * 1024; // 16MB
+                const CHUNK_SIZE = 1 * 1024 * 1024; // 1MB
+                const chunk = new Uint8Array(CHUNK_SIZE);
+
+                for (let i = 0; i < fileList.length; i++) {
+                    const fileName = fileList[i];
+                    self.postMessage({ workerId, status: \`\${fileName} を書き込み中...\` });
+
+                    try {
+                        const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+                        const writable = await fileHandle.createWritable();
+
+                        for (let j = 0; j < FILE_SIZE / CHUNK_SIZE; j++) {
+                            await writable.write(chunk);
+                        }
+                        await writable.close();
+                    } catch (err) {
+                        self.postMessage({ workerId, error: err.message });
+                        return;
+                    }
+                }
+
+                self.postMessage({ workerId, completed: true });
+            };
+        `;
+
+        async function startParallelGeneration() {
+            const countInput = document.getElementById('fileCount');
+            const totalCount = parseInt(countInput.value, 10);
+            const statusDiv = document.getElementById('status');
+            const btn = document.getElementById('startBtn');
+
+            if (!('showDirectoryPicker' in window)) {
+                alert('お使いのブラウザは File System Access API に対応していません。Chrome/Edge をご利用ください。');
+                return;
+            }
+
+            let dirHandle;
+            try {
+                dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+            } catch (err) {
+                statusDiv.innerText = 'フォルダ選択がキャンセルされました。';
+                return;
+            }
+
+            btn.disabled = true;
+            statusDiv.innerText = '4つの並列スレッドを起動中...\n';
+
+            // Workerの動的生成
+            const blob = new Blob([workerScript], { type: 'application/javascript' });
+            const workerUrl = URL.createObjectURL(blob);
+
+            const THREAD_COUNT = 4;
+            const tasks = Array.from({ length: THREAD_COUNT }, () => []);
+
+            // タスク（ファイル名）を4つのWorkerにラウンドロビンで割り当て
+            for (let i = 1; i <= totalCount; i++) {
+                const threadIndex = (i - 1) % THREAD_COUNT;
+                tasks[threadIndex].push(`file_${i}.bin`);
+            }
+
+            let completedThreads = 0;
+            const threadStatuses = new Array(THREAD_COUNT).fill('待機中');
+
+            const updateStatusDisplay = () => {
+                let text = '';
+                threadStatuses.forEach((st, idx) => {
+                    text += `スレッド ${idx + 1}: ${st}\n`;
+                });
+                statusDiv.innerText = text;
+            };
+
+            // 4個の Worker を起動して処理開始
+            for (let i = 0; i < THREAD_COUNT; i++) {
+                if (tasks[i].length === 0) {
+                    completedThreads++;
+                    threadStatuses[i] = '割り当てタスクなし（完了）';
+                    continue;
+                }
+
+                const worker = new Worker(workerUrl);
+                
+                worker.onmessage = (e) => {
+                    const { workerId, status, completed, error } = e.data;
+                    
+                    if (error) {
+                        threadStatuses[workerId] = `エラー: ${error}`;
+                        worker.terminate();
+                    } else if (completed) {
+                        threadStatuses[workerId] = '完了！';
+                        completedThreads++;
+                        worker.terminate();
+                        
+                        if (completedThreads === THREAD_COUNT) {
+                            statusDiv.innerText += '\nすべての並列書き込みが完了しました。';
+                            btn.disabled = false;
+                            URL.revokeObjectURL(workerUrl);
+                        }
+                    } else {
+                        threadStatuses[workerId] = status;
+                    }
+                    updateStatusDisplay();
+                };
+
+                // フォルダのアクセス権（dirHandle）をWorkerへ送信
+                worker.postMessage({
+                    workerId: i,
+                    dirHandle: dirHandle,
+                    fileList: tasks[i]
+                });
+            }
+
+            updateStatusDisplay();
+        }
+    </script>
+
+</body>
+</html>

@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>16MB Bin File Generator</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 450px;
+            margin: 40px auto;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="number"] {
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+        }
+        button {
+            width: 100%;
+            padding: 10px;
+            background-color: #28a745;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        #status {
+            margin-top: 15px;
+            font-size: 14px;
+            color: #333;
+            word-break: break-all;
+        }
+        progress {
+            width: 100%;
+            margin-top: 10px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>16MB .bin ファイル生成器</h2>
+    
+    <div class="form-group">
+        <label for="fileCount">作成する個数:</label>
+        <input type="number" id="fileCount" value="1" min="1" max="100">
+    </div>
+
+    <button id="startBtn" onclick="generateAndSave()">フォルダを指定して作成</button>
+    
+    <progress id="progressBar" value="0" max="100"></progress>
+    <div id="status"></div>
+
+    <script>
+        async function generateAndSave() {
+            const countInput = document.getElementById('fileCount');
+            const count = parseInt(countInput.value, 10);
+            const statusDiv = document.getElementById('status');
+            const btn = document.getElementById('startBtn');
+            const progressBar = document.getElementById('progressBar');
+
+            if (isNaN(count) || count < 1) {
+                alert('1以上の個数を指定してください。');
+                return;
+            }
+
+            // File System Access API のサポートチェック
+            if (!('showDirectoryPicker' in window)) {
+                alert('お使いのブラウザは File System Access API に対応していません。PC版の Google Chrome や Microsoft Edge をご利用ください。');
+                return;
+            }
+
+            let dirHandle;
+            try {
+                // ユーザーに保存先フォルダを選択してもらう
+                dirHandle = await window.showDirectoryPicker({
+                    mode: 'readwrite'
+                });
+            } catch (err) {
+                if (err.name === 'AbortError') {
+                    statusDiv.innerText = 'キャンセルされました。';
+                } else {
+                    statusDiv.innerText = 'フォルダ選択エラー: ' + err.message;
+                }
+                return;
+            }
+
+            btn.disabled = true;
+            progressBar.style.display = 'block';
+            progressBar.value = 0;
+
+            const FILE_SIZE = 16 * 1024 * 1024; // 16MB
+            const CHUNK_SIZE = 1 * 1024 * 1024; // メモリ節約用 1MB チャンク
+            const chunk = new Uint8Array(CHUNK_SIZE); // 空の1MBデータ
+
+            try {
+                for (let i = 1; i <= count; i++) {
+                    const fileName = `file_${i}.bin`;
+                    statusDiv.innerText = `[${i}/${count}] ${fileName} を書き込み中...`;
+
+                    // 指定フォルダ内にファイルシステム上のハンドルを取得/作成
+                    const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+                    // 書き込みストリームの作成
+                    const writable = await fileHandle.createWritable();
+
+                    // 16MB分書き込み (1MB × 16回)
+                    for (let j = 0; j < FILE_SIZE / CHUNK_SIZE; j++) {
+                        await writable.write(chunk);
+                    }
+                    // 書き込みを確定して閉じる
+                    await writable.close();
+
+                    // 進捗バーを更新
+                    progressBar.value = (i / count) * 100;
+                }
+
+                statusDiv.innerText = `完了！ ${count} 個のファイルを指定フォルダに保存しました。`;
+            } catch (err) {
+                console.error(err);
+                statusDiv.innerText = '書き込み中にエラーが発生しました: ' + err.message;
+            } finally {
+                btn.disabled = false;
+            }
+        }
+    </script>
+
+</body>
+</html>
